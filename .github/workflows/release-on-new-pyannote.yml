@@ -1,0 +1,154 @@
+name: Release images for new pyannote.audio versions
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-pyannote-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: pyannote-speaker-diarization
+
+jobs:
+  maybe-release:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: pyannote-speaker-diarization
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve latest pyannote.audio version
+        id: pypi
+        run: |
+          VERSION="$(curl -fsSL https://pypi.org/pypi/pyannote.audio/json | jq -r '.info.version')"
+          if [ -z "${VERSION}" ] || [ "${VERSION}" = "null" ]; then
+            echo "Failed to read pyannote.audio version from PyPI" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "major_minor=$(echo "${VERSION}" | cut -d. -f1-2)" >> "${GITHUB_OUTPUT}"
+          echo "major=$(echo "${VERSION}" | cut -d. -f1)" >> "${GITHUB_OUTPUT}"
+
+      - name: Check Docker Hub tag
+        id: dh
+        env:
+          VERSION: ${{ steps.pypi.outputs.version }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          code="$(curl -sS -o /dev/null -w "%{http_code}" \
+            "https://hub.docker.com/v2/repositories/${DOCKERHUB_USERNAME}/${IMAGE_NAME}/tags/${VERSION}/")"
+          echo "http_code=${code}" >> "${GITHUB_OUTPUT}"
+
+      - name: Skip if image already published
+        if: ${{ steps.dh.outputs.http_code == '200' }}
+        run: |
+          echo "Docker Hub already has tag ${{ steps.pypi.outputs.version }}; nothing to do."
+
+      - name: Configure git user
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create git tag (if missing) and push
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        env:
+          VERSION: ${{ steps.pypi.outputs.version }}
+        run: |
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          if git ls-remote --tags origin | grep -q "refs/tags/v${VERSION}$"; then
+            echo "Remote tag v${VERSION} already exists; skipping tag push."
+          else
+            git tag -a "v${VERSION}" -m "pyannote.audio ${VERSION}"
+            git push origin "refs/tags/v${VERSION}"
+          fi
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (CUDA)
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            PYANNOTE_VERSION=${{ steps.pypi.outputs.version }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major_minor }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major_minor }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (CPU)
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cpu
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            PYANNOTE_VERSION=${{ steps.pypi.outputs.version }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.version }}-cpu
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major_minor }}-cpu
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major }}-cpu
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-cpu
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.version }}-cpu
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major_minor }}-cpu
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major }}-cpu
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-cpu
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        if: ${{ steps.dh.outputs.http_code != '200' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.pypi.outputs.version }}
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "GitHub Release v${VERSION} already exists."
+          else
+            gh release create "v${VERSION}" \
+              --title "pyannote.audio ${VERSION}" \
+              --notes "Automated build for pyannote.audio ${VERSION}. Upstream changelog: https://github.com/pyannote/pyannote-audio/blob/main/CHANGELOG.md"
+          fi
