@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Omit build-arg or leave empty to install the latest pyannote.audio from PyPI at build time.
 ARG PYANNOTE_VERSION
