@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ARG PYTORCH_BASE=pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
-ARG PYANNOTE_VERSION=3.3.1
+ARG PYANNOTE_VERSION=4.0.4
 
 FROM ${PYTORCH_BASE}
 

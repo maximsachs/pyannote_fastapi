@@ -40,7 +40,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             -f Dockerfile \
-            --build-arg PYANNOTE_VERSION=3.3.1 \
+            --build-arg PYANNOTE_VERSION=4.0.4 \
             -t pyannote:pr-check \
             --load \
             .

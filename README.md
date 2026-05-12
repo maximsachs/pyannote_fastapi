@@ -110,7 +110,7 @@ Example JSON response:
   "segments": [{"start": 0.21, "end": 3.84, "speaker": "SPEAKER_00"}],
   "processing_time_seconds": 4.2,
   "model": "pyannote/speaker-diarization-community-1",
-  "pyannote_version": "3.3.1"
+  "pyannote_version": "4.0.4"
 }
 ```
 
@@ -160,7 +160,7 @@ No Hugging Face token is required **to build** — only to **run** the container
 
 ```bash
 docker build \
-  --build-arg PYANNOTE_VERSION=3.3.1 \
+  --build-arg PYANNOTE_VERSION=4.0.4 \
   -t pyannote-diarization:local \
   .
 ```
@@ -169,7 +169,7 @@ CPU variant:
 
 ```bash
 docker build \
-  --build-arg PYANNOTE_VERSION=3.3.1 \
+  --build-arg PYANNOTE_VERSION=4.0.4 \
   -f Dockerfile.cpu \
   -t pyannote-diarization:local-cpu \
   .
