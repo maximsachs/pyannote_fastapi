@@ -71,7 +71,7 @@ PYANNOTE_BUILD = Info(
     "Static build/runtime information for the diarization service",
 )
 
-_BEARER_SCHEME = HTTPBearer(auto_error=False, bearer_format="API key")
+_BEARER_SCHEME = HTTPBearer(bearerFormat="API key", auto_error=False)
 
 
 def _read_allowed_api_keys() -> frozenset[str]:
