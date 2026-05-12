@@ -20,3 +20,5 @@ venv/
 *.mp3
 *.flac
 /tmp/
+
+test-audio/

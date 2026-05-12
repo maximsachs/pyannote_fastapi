@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,8 +25,8 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import JSONResponse
-from fastapi.security import APIKeyHeader
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     REGISTRY,
@@ -68,7 +71,7 @@ PYANNOTE_BUILD = Info(
     "Static build/runtime information for the diarization service",
 )
 
-_API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+_BEARER_SCHEME = HTTPBearer(auto_error=False, bearer_format="API key")
 
 
 def _read_allowed_api_keys() -> frozenset[str]:
@@ -91,6 +94,12 @@ MODEL_ID = os.environ.get(
 
 MODEL_CARD_URL = "https://huggingface.co/pyannote/speaker-diarization-community-1"
 MODEL_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
+
+DIARIZE_WORKERS = max(1, int(os.environ.get("DIARIZE_WORKERS", "1").strip() or "1"))
+SSE_HEARTBEAT_SECONDS = max(
+    0.5, float(os.environ.get("SSE_HEARTBEAT_SECONDS", "5").strip() or "5")
+)
+MAX_QUEUE_DEPTH = max(1, int(os.environ.get("MAX_QUEUE_DEPTH", "64").strip() or "64"))
 
 
 class SegmentModel(BaseModel):
@@ -228,9 +237,109 @@ def _annotation_to_segments(diarization: Annotation) -> tuple[list[SegmentModel]
     return segments, speakers_sorted
 
 
+class _DiarizationParams(BaseModel):
+    num_speakers: int | None = None
+    min_speakers: int | None = None
+    max_speakers: int | None = None
+    exclusive: bool = False
+
+
+class _Job:
+    """One queued diarization request and its private event stream."""
+
+    def __init__(self, tmp_path: Path, params: _DiarizationParams) -> None:
+        self.id: str = uuid.uuid4().hex
+        self.tmp_path: Path = tmp_path
+        self.params: _DiarizationParams = params
+        self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+
+_JOB_QUEUE: asyncio.Queue[_Job] | None = None
+_WORKER_TASKS: list[asyncio.Task[None]] = []
+
+
+def _run_diarization_sync(tmp_path: Path, params: _DiarizationParams) -> DiarizeResponse:
+    """Blocking diarization pipeline call; intended for asyncio.to_thread."""
+    t0 = time.monotonic()
+    waveform, sample_rate = torchaudio.load(str(tmp_path))
+    if waveform.dim() != 2:
+        raise HTTPException(status_code=400, detail={"error": "invalid_audio"})
+    audio_duration = float(waveform.shape[1]) / float(sample_rate)
+    AUDIO_DURATION_SECONDS.observe(audio_duration)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    waveform = waveform.to(device)
+
+    infer_kwargs: dict[str, Any] = {}
+    if params.num_speakers is not None:
+        infer_kwargs["num_speakers"] = params.num_speakers
+    if params.min_speakers is not None:
+        infer_kwargs["min_speakers"] = params.min_speakers
+    if params.max_speakers is not None:
+        infer_kwargs["max_speakers"] = params.max_speakers
+
+    t_infer0 = time.monotonic()
+    raw_out = _pipeline({"waveform": waveform, "sample_rate": sample_rate}, **infer_kwargs)
+    DIARIZATION_SECONDS.observe(time.monotonic() - t_infer0)
+
+    try:
+        diarization = _extract_diarization_output(raw_out, exclusive=params.exclusive)
+    except (KeyError, TypeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "diarization_output_parse_failed"},
+        ) from exc
+
+    segments, speakers = _annotation_to_segments(diarization)
+    return DiarizeResponse(
+        duration_seconds=audio_duration,
+        num_speakers=len(speakers),
+        speakers=speakers,
+        segments=segments,
+        processing_time_seconds=time.monotonic() - t0,
+        pyannote_version=_pyannote_version,
+    )
+
+
+async def _worker(worker_id: int) -> None:
+    """Pull jobs off the shared queue and run the pyannote pipeline in a thread."""
+    assert _JOB_QUEUE is not None
+    while True:
+        job = await _JOB_QUEUE.get()
+        ACTIVE_REQUESTS.inc()
+        try:
+            await job.events.put({"type": "status", "phase": "running", "worker": worker_id})
+            logger.info("job_started job=%s worker=%s", job.id, worker_id)
+            try:
+                result = await asyncio.to_thread(_run_diarization_sync, job.tmp_path, job.params)
+            except HTTPException as exc:
+                await job.events.put(
+                    {"type": "error", "status": exc.status_code, "detail": exc.detail}
+                )
+            except (RuntimeError, ValueError, OSError, KeyError, TypeError) as exc:
+                logger.exception("diarization_failed job=%s err=%s", job.id, exc)
+                await job.events.put(
+                    {"type": "error", "status": 500, "detail": {"error": "diarization_failed"}}
+                )
+            else:
+                await job.events.put({"type": "result", "data": result.model_dump()})
+                logger.info("job_finished job=%s worker=%s", job.id, worker_id)
+        finally:
+            ACTIVE_REQUESTS.dec()
+            try:
+                job.tmp_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not delete temp upload %s: %s", job.tmp_path, exc)
+            _JOB_QUEUE.task_done()
+
+
+def _sse_frame(event: str, data: dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global _pipeline, _pyannote_version
+    global _pipeline, _pyannote_version, _JOB_QUEUE
     app.state.ready = False
     MODEL_LOADED.set(0)
     _pyannote_version = _load_pyannote_version()
@@ -251,6 +360,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         }
     )
     _pipeline = _load_pipeline()
+    _JOB_QUEUE = asyncio.Queue(maxsize=MAX_QUEUE_DEPTH)
+    for i in range(DIARIZE_WORKERS):
+        _WORKER_TASKS.append(asyncio.create_task(_worker(i), name=f"diarize-worker-{i}"))
     app.state.ready = True
     MODEL_LOADED.set(1)
     logger.info(
@@ -259,18 +371,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         MODEL_LICENSE_URL,
         MODEL_CARD_URL,
     )
-    logger.info("Pipeline loaded; ready to serve.")
+    logger.info(
+        "Pipeline loaded; ready to serve. workers=%d max_queue_depth=%d heartbeat=%.1fs",
+        DIARIZE_WORKERS,
+        MAX_QUEUE_DEPTH,
+        SSE_HEARTBEAT_SECONDS,
+    )
     yield
     MODEL_LOADED.set(0)
     app.state.ready = False
+    for task in _WORKER_TASKS:
+        task.cancel()
+    await asyncio.gather(*_WORKER_TASKS, return_exceptions=True)
+    _WORKER_TASKS.clear()
+    _JOB_QUEUE = None
     _pipeline = None
 
 
 app = FastAPI(title="pyannote speaker diarization (community-1)", lifespan=lifespan)
 
 
-def _require_api_key(x_api_key: Annotated[str | None, Depends(_API_KEY_HEADER)]) -> None:
-    if x_api_key is None or x_api_key not in ALLOWED_API_KEYS:
+def _require_api_key(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER_SCHEME)],
+) -> None:
+    if credentials is None or credentials.credentials not in ALLOWED_API_KEYS:
         raise HTTPException(status_code=401, detail={"error": "unauthorized"})
 
 
@@ -304,76 +428,123 @@ async def metrics() -> Response:
     return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
 
 
-@app.post("/diarize", response_model=DiarizeResponse)
+@app.post("/diarize")
 async def diarize(
     _auth: Annotated[None, Depends(_require_api_key)],
+    request: Request,
     file: Annotated[UploadFile, File(..., description="Audio file")],
     num_speakers: Annotated[int | None, Query()] = None,
     min_speakers: Annotated[int | None, Query()] = None,
     max_speakers: Annotated[int | None, Query()] = None,
     exclusive: Annotated[bool, Query()] = False,
-) -> DiarizeResponse:
-    if _pipeline is None:
+) -> StreamingResponse:
+    if _pipeline is None or _JOB_QUEUE is None:
         raise HTTPException(status_code=503, detail={"error": "pipeline_not_loaded"})
-    ACTIVE_REQUESTS.inc()
-    tmp_path: Path | None = None
-    t0 = time.monotonic()
-    try:
-        suffix = Path(file.filename or "audio").suffix or ".wav"
-        with tempfile.NamedTemporaryFile(
-            prefix="pyannote_upload_", suffix=suffix, delete=False
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            chunk_size = 1024 * 1024
-            while True:
-                chunk = await file.read(chunk_size)
-                if not chunk:
-                    break
-                tmp.write(chunk)
 
-        waveform, sample_rate = torchaudio.load(str(tmp_path))
-        if waveform.dim() != 2:
-            raise HTTPException(status_code=400, detail={"error": "invalid_audio"})
-        audio_duration = float(waveform.shape[1]) / float(sample_rate)
-        AUDIO_DURATION_SECONDS.observe(audio_duration)
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        waveform = waveform.to(device)
-
-        infer_kwargs: dict[str, Any] = {}
-        if num_speakers is not None:
-            infer_kwargs["num_speakers"] = num_speakers
-        if min_speakers is not None:
-            infer_kwargs["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            infer_kwargs["max_speakers"] = max_speakers
-
-        t_infer0 = time.monotonic()
-        raw_out = _pipeline({"waveform": waveform, "sample_rate": sample_rate}, **infer_kwargs)
-        DIARIZATION_SECONDS.observe(time.monotonic() - t_infer0)
-
-        try:
-            diarization = _extract_diarization_output(raw_out, exclusive=exclusive)
-        except (KeyError, TypeError) as exc:
-            raise HTTPException(
-                status_code=500,
-                detail={"error": "diarization_output_parse_failed"},
-            ) from exc
-
-        segments, speakers = _annotation_to_segments(diarization)
-        processing_time = time.monotonic() - t0
-        return DiarizeResponse(
-            duration_seconds=audio_duration,
-            num_speakers=len(speakers),
-            speakers=speakers,
-            segments=segments,
-            processing_time_seconds=processing_time,
-            pyannote_version=_pyannote_version,
+    if _JOB_QUEUE.full():
+        logger.warning(
+            "queue_full reject endpoint=/diarize depth=%d max=%d",
+            _JOB_QUEUE.qsize(),
+            MAX_QUEUE_DEPTH,
         )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "queue_full", "max_queue_depth": MAX_QUEUE_DEPTH},
+            headers={"Retry-After": "5"},
+        )
+
+    suffix = Path(file.filename or "audio").suffix or ".wav"
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 - closed manually below
+        prefix="pyannote_upload_", suffix=suffix, delete=False
+    )
+    tmp_path = Path(tmp.name)
+    try:
+        chunk_size = 1024 * 1024
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            tmp.write(chunk)
     finally:
-        ACTIVE_REQUESTS.dec()
-        if tmp_path is not None:
+        tmp.close()
+
+    params = _DiarizationParams(
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        exclusive=exclusive,
+    )
+    job = _Job(tmp_path=tmp_path, params=params)
+    try:
+        _JOB_QUEUE.put_nowait(job)
+    except asyncio.QueueFull as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            logger.warning("Could not delete temp upload %s: %s", tmp_path, unlink_exc)
+        logger.warning(
+            "queue_full reject_after_upload depth=%d max=%d",
+            _JOB_QUEUE.qsize(),
+            MAX_QUEUE_DEPTH,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "queue_full", "max_queue_depth": MAX_QUEUE_DEPTH},
+            headers={"Retry-After": "5"},
+        ) from exc
+    logger.info(
+        "job_queued job=%s queue_depth=%d max=%d",
+        job.id,
+        _JOB_QUEUE.qsize(),
+        MAX_QUEUE_DEPTH,
+    )
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        t0 = time.monotonic()
+        phase = "queued"
+        yield _sse_frame("status", {"job_id": job.id, "phase": phase})
+        while True:
+            if await request.is_disconnected():
+                logger.info("client_disconnected job=%s phase=%s", job.id, phase)
+                return
             try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError as exc:
-                logger.warning("Could not delete temp upload %s: %s", tmp_path, exc)
+                event = await asyncio.wait_for(
+                    job.events.get(), timeout=SSE_HEARTBEAT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                yield _sse_frame(
+                    "heartbeat",
+                    {
+                        "job_id": job.id,
+                        "phase": phase,
+                        "elapsed_seconds": round(time.monotonic() - t0, 2),
+                    },
+                )
+                continue
+
+            kind = event["type"]
+            if kind == "status":
+                phase = event["phase"]
+                yield _sse_frame(
+                    "status",
+                    {"job_id": job.id, "phase": phase, "worker": event.get("worker")},
+                )
+            elif kind == "result":
+                yield _sse_frame("result", {"job_id": job.id, **event["data"]})
+                return
+            elif kind == "error":
+                yield _sse_frame(
+                    "error",
+                    {"job_id": job.id, "status": event["status"], "detail": event["detail"]},
+                )
+                return
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

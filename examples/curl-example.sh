@@ -11,7 +11,8 @@ curl -fsS "${BASE_URL}/health"
 
 curl -fsS "${BASE_URL}/metrics" | head
 
-curl -fsS \
+curl -fsS -N \
   -X POST "${BASE_URL}/diarize?num_speakers=2" \
-  -H "X-API-Key: ${API_KEY}" \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Accept: text/event-stream" \
   -F "file=@${AUDIO};type=audio/wav"

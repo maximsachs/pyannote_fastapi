@@ -4,65 +4,34 @@
 [![Workflow: build-on-push](https://img.shields.io/github/actions/workflow/status/maximsachs/pyannote_fastapi/build-on-push.yml?branch=main&label=build)](https://github.com/maximsachs/pyannote_fastapi/actions/workflows/build-on-push.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/maximsachs/pyannote_fastapi.svg)](https://hub.docker.com/r/maximsachs/pyannote_fastapi)
 
-**Images:** `docker.io/maximsachs/pyannote_fastapi` and `ghcr.io/maximsachs/pyannote_fastapi`.
+A minimal FastAPI service around [**pyannote/speaker-diarization-community-1**](https://huggingface.co/pyannote/speaker-diarization-community-1). The pipeline is loaded once at startup; diarization requests are queued to in-process workers and streamed back to the client as Server-Sent Events with periodic heartbeats and a final result frame.
 
-**Base images (resolved automatically at build time):**
-- **CUDA** (`:latest` and `:<version>`): `pytorch/pytorch:<torch>-cuda<X.Y>-cudnn9-runtime`. CI runs `scripts/resolve-pytorch-base.sh`, which (a) reads pyannote.audio's `torch>=…` lower bound from its PyPI metadata and (b) picks the **lowest** available pytorch/pytorch tag that satisfies it, preferring CUDA 12.8. This keeps NVIDIA driver requirements as low as the pyannote release allows. Override at build time with `--build-arg PYTORCH_BASE=...` (or run the script with `TORCH_SELECT=max` for the newest available torch). Inspect the actual base used via `docker inspect <image> | jq '.[0].Config.Labels["org.opencontainers.image.base.name"]'`.
-- **CPU** (`:latest-cpu` and `:<version>-cpu`): `python:3.11-slim` + `torch` / `torchaudio` CPU wheels from `https://download.pytorch.org/whl/cpu` (always picks current stable, which satisfies the same lower bound).
+**Images:** `docker.io/maximsachs/pyannote_fastapi` and `ghcr.io/maximsachs/pyannote_fastapi` (CUDA `:latest`, CPU `:latest-cpu`).
 
-This repository ships a **minimal FastAPI** service around **[pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)**: it loads the pipeline once at startup, exposes a small HTTP API with Prometheus metrics, and publishes **CUDA** and **CPU** images that contain **application code only** — **not** redistributed model weights.
+**Integrating a client?** See [`docs/API.md`](docs/API.md) for the full endpoint reference, every error code, the SSE event schema, and the performance-tuning knobs.
 
-## License, attribution, and why weights are not in the image
+## Model access (weights are not bundled)
 
-The upstream pipeline is published on Hugging Face as [**pyannote/speaker-diarization-community-1**](https://huggingface.co/pyannote/speaker-diarization-community-1) under **Creative Commons [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)** (see the model card). **CC-BY-4.0** generally requires **appropriate credit**, a **link to the license**, and **indication of changes** when you share adapted material. This wrapper code is **MIT** ([`LICENSE`](LICENSE)); it does **not** replace or narrow the obligations that apply to **the model weights themselves** when you copy or share them.
+The upstream pipeline is **CC-BY-4.0** and **gated** on Hugging Face. This image ships application code only. At runtime you must either:
 
-The same model card explains that access to files is **gated**: you must **log in and accept the access conditions** on Hugging Face before downloading. **Publishing a public container image with the weights pre-copied would let anyone pull the model without going through that flow**, which is a serious compliance risk against **[Hugging Face’s terms](https://huggingface.co/terms)** and the intent of model-gating — even if the weights are technically CC-BY-4.0.
+1. Set `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) from an account that has accepted the [model card](https://huggingface.co/pyannote/speaker-diarization-community-1) terms, **or**
+2. Mount an offline checkout and set `MODEL_PATH` to its directory (must contain `config.yaml`).
 
-**This project therefore does not bake weights into the image.** At runtime you must either:
-
-1. Provide your own **`HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`** (from an account that has accepted the model conditions) so `pyannote` can download/cache artifacts, **or**
-2. Mount an **offline checkout** you obtained lawfully (for example after accepting the conditions and running `git lfs clone` per the model card’s **Offline use** section) and point **`MODEL_PATH`** at that directory.
-
-The service logs a one-line **attribution** string at startup (model id, CC-BY-4.0 link, and model card URL). *This is not legal advice; confirm redistribution with counsel if you ship snapshots or derivative images.*
-
-## Secrets and CI configuration
-
-Configure the following **GitHub Actions secrets** for publishing images:
-
-| Secret | Purpose |
-| --- | --- |
-| `DOCKERHUB_USERNAME` | Docker Hub namespace used for publishing. |
-| `DOCKERHUB_TOKEN` | Docker Hub access token with push permission. |
-
-`GITHUB_TOKEN` is provided automatically for GHCR pushes.
-
-**CI builds do not need `HF_TOKEN`**: images contain no gated weights.
-
-**Runtime / deployment** (your cluster or `docker run`):
-
-| Secret / env | Purpose |
-| --- | --- |
-| `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` | Hugging Face token with access to community-1, used **only inside your running container** to download/cache the pipeline via `huggingface_hub`. |
-| `API_KEYS` | Comma-separated API keys for this HTTP service (same as before). |
-
-**Minimal runtime (typical hub setup):** set only **`API_KEYS`** and **`HF_TOKEN`** (or `HUGGING_FACE_HUB_TOKEN`). The image already sets **`HF_HOME=/opt/huggingface`**; Hugging Face uses that as the cache root. Mount a volume at **`/opt/huggingface`** if you want downloads to survive restarts — **no extra cache-related env** is required.
-
-If you mount the cache somewhere else, set **`HF_HOME`** to the **same path** as `volumeMounts.mountPath` (standard Hugging Face convention).
-
-## Environment variables (runtime)
+## Environment variables
 
 | Name | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `API_KEYS` | **Yes** | _none_ | Comma-separated accepted API keys (rotation = multiple active keys; each request sends one `X-API-Key` matching **any** entry). |
-| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | **Yes\*** | _none_ | \*Required **unless** `MODEL_PATH` points at a full offline pipeline directory (must contain `config.yaml`). |
-| `MODEL_PATH` | No | _(unset)_ | Absolute path to your **local** checkout of the pipeline (bind-mount or `emptyDir` populated by an init container). When unset, the hub id `MODEL_ID` is used. |
-| `MODEL_ID` | No | `pyannote/speaker-diarization-community-1` | Hub repo id used when `MODEL_PATH` is unset. |
-| `HF_HOME` | No | `/opt/huggingface` (**set in image**) | Hugging Face cache directory (`hub/`, etc.). Override **only** if you mount storage at a non-default path — **must match** the container mount path. |
-| `LOG_LEVEL` | No | `INFO` | Python logging level for the service. |
+| `API_KEYS` | yes | — | Comma-separated accepted keys; clients send one via `Authorization: Bearer <key>`. |
+| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | yes\* | — | \*Unless `MODEL_PATH` is set. |
+| `MODEL_PATH` | no | — | Absolute path to a local pipeline checkout. |
+| `MODEL_ID` | no | `pyannote/speaker-diarization-community-1` | Hub repo id when `MODEL_PATH` is unset. |
+| `HF_HOME` | no | `/opt/huggingface` | Hugging Face cache root (mount a volume here to persist). |
+| `DIARIZE_WORKERS` | no | `1` | Concurrent diarization workers. Keep at `1` for single-GPU setups. |
+| `MAX_QUEUE_DEPTH` | no | `64` | Max number of jobs that may be queued. Further requests are rejected with `503 {"error":"queue_full"}` and a `Retry-After: 5` header. |
+| `SSE_HEARTBEAT_SECONDS` | no | `5` | Interval between SSE `heartbeat` frames while a job is queued or running. |
+| `LOG_LEVEL` | no | `INFO` | Python logging level. |
 
 ## Quick start
-
-After accepting the access conditions on the [model card](https://huggingface.co/pyannote/speaker-diarization-community-1) and creating a token at [hf.co/settings/tokens](https://huggingface.co/settings/tokens):
 
 ```bash
 docker run --rm -it --gpus all \
@@ -73,68 +42,30 @@ docker run --rm -it --gpus all \
   ghcr.io/maximsachs/pyannote_fastapi:latest
 ```
 
-```bash
-curl -fsS http://127.0.0.1:8000/live
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/metrics | head
+Submit a file and tail the SSE stream:
 
-curl -fsS \
-  -H "X-API-Key: replace-me" \
+```bash
+curl -N -fsS \
+  -H "Authorization: Bearer replace-me" \
+  -H "Accept: text/event-stream" \
   -F "file=@/path/to/audio.wav" \
   http://127.0.0.1:8000/diarize
 ```
 
-Files under `examples/` mirror these flows (`docker-run.sh`, `curl-example.sh`, `k8s-deployment.yaml`).
+`-N` disables curl's output buffering so you see each event as it arrives.
 
 ## HTTP API
 
-### `GET /live`
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/live` | Liveness. `200` while the process is up. |
+| `GET` | `/health` | Readiness. `200 {"status":"ready"}` once the pipeline is loaded; `503 {"status":"not_ready"}` otherwise. |
+| `GET` | `/metrics` | Prometheus exposition. |
+| `POST` | `/diarize` | Submit audio, receive an SSE stream of `status` / `heartbeat` events ending in a `result` (or `error`) event. |
 
-Liveness: returns `200` if the process is running.
+**See [`docs/API.md`](docs/API.md)** for the complete request/response schema, every error code, the full SSE event reference, and a client implementation checklist.
 
-### `GET /health`
-
-Readiness: returns `200` with `{"status":"ready"}` once the diarization pipeline has finished loading; `503` with `{"status":"not_ready"}` beforehand.
-
-### `GET /metrics`
-
-Prometheus exposition format (includes standard process collectors where supported by `prometheus-client`).
-
-### `POST /diarize`
-
-- **Auth:** `X-API-Key` header must match one of the configured `API_KEYS`.
-- **Body:** `multipart/form-data` with field name `file`.
-- **Optional query parameters:** `num_speakers`, `min_speakers`, `max_speakers`, `exclusive` (boolean; selects `exclusive_speaker_diarization` when supported).
-
-Example JSON response:
-
-```json
-{
-  "duration_seconds": 123.45,
-  "num_speakers": 2,
-  "speakers": ["SPEAKER_00", "SPEAKER_01"],
-  "segments": [{"start": 0.21, "end": 3.84, "speaker": "SPEAKER_00"}],
-  "processing_time_seconds": 4.2,
-  "model": "pyannote/speaker-diarization-community-1",
-  "pyannote_version": "<from installed pyannote.audio>"
-}
-```
-
-**Operational note:** requests are processed synchronously — configure your reverse proxy / ingress timeouts accordingly. First startup with hub download can take several minutes; probe timings and `HEALTHCHECK` `start-period` are set generously in the Dockerfiles.
-
-## Image tagging scheme
-
-| Tag pattern | Meaning |
-| --- | --- |
-| `latest`, `latest-cpu` | Most recent **`main`** build, using **whatever `pyannote.audio` version is current on PyPI** at workflow run time (see `build-on-push.yml`). |
-| `sha-<short>` | Immutable commit build on `main`. |
-| `<semver>`, `<major>.<minor>`, `<major>` | Published by the scheduled PyPI-driven workflow for a released `pyannote.audio` version. |
-| `<semver>-cpu`, … | CPU-only variant (smaller image; no GPU required). |
-
-## How automatic builds work
-
-1. **`build-on-push.yml`** runs on every **`main`** push (and `workflow_dispatch`): it reads **`https://pypi.org/pypi/pyannote.audio/json`**, installs that version in both CUDA and CPU images, and pushes **`latest`** / **`sha-<short>`** — **no hardcoded pyannote version** in the repo.
-2. **`release-on-new-pyannote.yml`** runs **daily at 04:00 UTC** (and `workflow_dispatch`): if PyPI’s latest **`pyannote.audio`** is **new** (no matching image tag on Docker Hub yet), it builds and pushes **`X.Y.Z`**, **`X.Y`**, **`X`**, **`latest`**, and **`*-cpu`** for that release, creates a Git tag, and opens a GitHub Release.
+**Proxy note:** the SSE response sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`. If you front this with nginx, also set `proxy_buffering off` on the `/diarize` location and make sure idle timeouts on every hop are larger than `SSE_HEARTBEAT_SECONDS`.
 
 ## Local development
 
@@ -147,44 +78,11 @@ export PYANNOTE_TESTING=1
 uvicorn main:app --app-dir app --reload --host 0.0.0.0 --port 8000
 ```
 
-Run checks:
-
 ```bash
 ruff check app tests
 pytest -q
 ```
 
-## Security notes
+## License and attribution
 
-- Public images **do not embed** `HF_TOKEN`, `API_KEYS`, or community-1 weights.
-- Mount a volume at **`/opt/huggingface`** (the image’s default **`HF_HOME`**) so Hub snapshots persist — **or** mount elsewhere and set **`HF_HOME`** to that path. Cached blobs are still gated material: **treat the volume as sensitive**.
-- Keep production secrets in your orchestrator (`Kubernetes` `Secret`, Docker `--env-file` with a **gitignored** `.env`, etc.). `.gitignore` ignores local `.env*` while keeping sample manifests in `examples/`.
-
-## Building images locally
-
-No Hugging Face token is required **to build** — only to **run** the container (unless you mount an offline `MODEL_PATH`):
-
-```bash
-# Uses latest pyannote.audio from PyPI at build time (omit build-arg).
-docker build \
-  -t pyannote-diarization:local \
-  .
-```
-
-To pin a specific release (e.g. reproduce an issue):
-
-```bash
-docker build \
-  --build-arg PYANNOTE_VERSION=X.Y.Z \
-  -t pyannote-diarization:local \
-  .
-```
-
-CPU variant (same pattern: omit `--build-arg` for latest):
-
-```bash
-docker build \
-  -f Dockerfile.cpu \
-  -t pyannote-diarization:local-cpu \
-  .
-```
+Wrapper code is **MIT** ([`LICENSE`](LICENSE)). The model is **CC-BY-4.0**; the service logs an attribution line (model id, license URL, model card URL) at startup. Cached weights on the mounted volume remain gated material — treat the volume as sensitive.

@@ -106,4 +106,4 @@ spec:
       targetPort: 8000
 ---
 # Ingress is intentionally minimal: wire TLS, auth at the edge (e.g. Traefik),
-# rate limiting, and timeouts — this service only enforces X-API-Key on /diarize.
+# rate limiting, and timeouts — this service only enforces Authorization: Bearer on /diarize.
