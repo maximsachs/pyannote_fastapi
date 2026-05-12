@@ -11,7 +11,6 @@ permissions:
 
 env:
   IMAGE_NAME: pyannote-speaker-diarization
-  PYANNOTE_VERSION: "4.0.4"
 
 jobs:
   docker:
@@ -19,6 +18,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Latest pyannote.audio on PyPI
+        id: pypi
+        run: |
+          VERSION="$(curl -fsSL https://pypi.org/pypi/pyannote.audio/json | jq -r '.info.version')"
+          if [ -z "${VERSION}" ] || [ "${VERSION}" = "null" ]; then
+            echo "Failed to read pyannote.audio version from PyPI" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Using pyannote.audio==${VERSION} for this build"
 
       - name: Compute tags
         id: meta
@@ -49,7 +59,7 @@ jobs:
           push: true
           platforms: linux/amd64
           build-args: |
-            PYANNOTE_VERSION=${{ env.PYANNOTE_VERSION }}
+            PYANNOTE_VERSION=${{ steps.pypi.outputs.version }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_tag }}
@@ -66,7 +76,7 @@ jobs:
           push: true
           platforms: linux/amd64
           build-args: |
-            PYANNOTE_VERSION=${{ env.PYANNOTE_VERSION }}
+            PYANNOTE_VERSION=${{ steps.pypi.outputs.version }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_tag }}-cpu
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-cpu

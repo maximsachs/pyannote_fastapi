@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1
 
 ARG PYTORCH_BASE=pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
-ARG PYANNOTE_VERSION=4.0.4
 
 FROM ${PYTORCH_BASE}
 
+# Omit build-arg or leave empty to install the latest pyannote.audio from PyPI at build time.
+# CI passes the current PyPI release so CUDA/CPU images in one run match.
 ARG PYANNOTE_VERSION
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME=/opt/huggingface
 
@@ -22,7 +24,12 @@ WORKDIR /app
 
 COPY app/requirements.txt /app/requirements.txt
 
-RUN pip install --no-cache-dir -r /app/requirements.txt "pyannote.audio==${PYANNOTE_VERSION}"
+RUN pip install --no-cache-dir -r /app/requirements.txt \
+    && if [ -z "${PYANNOTE_VERSION}" ]; then \
+         pip install --no-cache-dir "pyannote.audio"; \
+       else \
+         pip install --no-cache-dir "pyannote.audio==${PYANNOTE_VERSION}"; \
+       fi
 
 COPY app/ /app/
 

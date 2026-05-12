@@ -110,7 +110,7 @@ Example JSON response:
   "segments": [{"start": 0.21, "end": 3.84, "speaker": "SPEAKER_00"}],
   "processing_time_seconds": 4.2,
   "model": "pyannote/speaker-diarization-community-1",
-  "pyannote_version": "4.0.4"
+  "pyannote_version": "<from installed pyannote.audio>"
 }
 ```
 
@@ -120,15 +120,15 @@ Example JSON response:
 
 | Tag pattern | Meaning |
 | --- | --- |
-| `latest`, `latest-cpu` | Most recent **`main`** build defaults (see workflow env `PYANNOTE_VERSION`). |
+| `latest`, `latest-cpu` | Most recent **`main`** build, using **whatever `pyannote.audio` version is current on PyPI** at workflow run time (see `build-on-push.yml`). |
 | `sha-<short>` | Immutable commit build on `main`. |
 | `<semver>`, `<major>.<minor>`, `<major>` | Published by the scheduled PyPI-driven workflow for a released `pyannote.audio` version. |
 | `<semver>-cpu`, … | CPU-only variant (smaller image; no GPU required). |
 
 ## How automatic builds work
 
-1. **`build-on-push.yml`** builds and pushes on every `main` push using the workflow’s `PYANNOTE_VERSION` pin (keep this aligned with what you want `latest` to track).
-2. **`release-on-new-pyannote.yml`** runs **daily at 04:00 UTC** (and on `workflow_dispatch`): it reads the **latest `pyannote.audio` from PyPI**, skips work if Docker Hub already has that semver tag, otherwise builds/pushes the semver-tagged matrix and opens a GitHub Release.
+1. **`build-on-push.yml`** runs on every **`main`** push (and `workflow_dispatch`): it reads **`https://pypi.org/pypi/pyannote.audio/json`**, installs that version in both CUDA and CPU images, and pushes **`latest`** / **`sha-<short>`** — **no hardcoded pyannote version** in the repo.
+2. **`release-on-new-pyannote.yml`** runs **daily at 04:00 UTC** (and `workflow_dispatch`): if PyPI’s latest **`pyannote.audio`** is **new** (no matching image tag on Docker Hub yet), it builds and pushes **`X.Y.Z`**, **`X.Y`**, **`X`**, **`latest`**, and **`*-cpu`** for that release, creates a Git tag, and opens a GitHub Release.
 
 ## Local development
 
@@ -159,17 +159,25 @@ pytest -q
 No Hugging Face token is required **to build** — only to **run** the container (unless you mount an offline `MODEL_PATH`):
 
 ```bash
+# Uses latest pyannote.audio from PyPI at build time (omit build-arg).
 docker build \
-  --build-arg PYANNOTE_VERSION=4.0.4 \
   -t pyannote-diarization:local \
   .
 ```
 
-CPU variant:
+To pin a specific release (e.g. reproduce an issue):
 
 ```bash
 docker build \
-  --build-arg PYANNOTE_VERSION=4.0.4 \
+  --build-arg PYANNOTE_VERSION=X.Y.Z \
+  -t pyannote-diarization:local \
+  .
+```
+
+CPU variant (same pattern: omit `--build-arg` for latest):
+
+```bash
+docker build \
   -f Dockerfile.cpu \
   -t pyannote-diarization:local-cpu \
   .
