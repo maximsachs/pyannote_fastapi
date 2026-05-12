@@ -9,6 +9,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: build-on-push-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE_NAME: pyannote_fastapi
 
@@ -79,7 +83,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_tag }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Build and push (CPU)
         uses: docker/build-push-action@v6
@@ -98,4 +102,4 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_tag }}-cpu
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-cpu
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min

@@ -129,7 +129,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Build and push (CPU)
         if: ${{ steps.dh.outputs.http_code != '200' }}
@@ -153,7 +153,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.pypi.outputs.major }}-cpu
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-cpu
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Create GitHub Release
         if: ${{ steps.dh.outputs.http_code != '200' }}
