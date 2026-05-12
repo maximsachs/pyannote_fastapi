@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: pyannote-speaker-diarization
+  IMAGE_NAME: pyannote_fastapi
 
 jobs:
   docker:
@@ -30,10 +30,20 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "Using pyannote.audio==${VERSION} for this build"
 
+      - name: Resolve PyTorch base image
+        id: base
+        env:
+          PYANNOTE_VERSION: ${{ steps.pypi.outputs.version }}
+        run: |
+          BASE="$(scripts/resolve-pytorch-base.sh)"
+          echo "pytorch_base=${BASE}" >> "${GITHUB_OUTPUT}"
+          echo "PyTorch base image: ${BASE}"
+
       - name: Compute tags
         id: meta
         run: |
-         echo "sha_tag=sha-$(echo "${GITHUB_SHA}" | cut -c1-7)" >> "${GITHUB_OUTPUT}"
+          echo "sha_tag=sha-$(echo "${GITHUB_SHA}" | cut -c1-7)" >> "${GITHUB_OUTPUT}"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -59,7 +69,10 @@ jobs:
           push: true
           platforms: linux/amd64
           build-args: |
+            PYTORCH_BASE=${{ steps.base.outputs.pytorch_base }}
             PYANNOTE_VERSION=${{ steps.pypi.outputs.version }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_tag }}
@@ -77,6 +90,8 @@ jobs:
           platforms: linux/amd64
           build-args: |
             PYANNOTE_VERSION=${{ steps.pypi.outputs.version }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_tag }}-cpu
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest-cpu

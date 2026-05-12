@@ -1,8 +1,14 @@
 # pyannote speaker diarization FastAPI Docker image
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Workflow: build-on-push](https://img.shields.io/github/actions/workflow/status/OWNER/REPO/build-on-push.yml?branch=main&label=build)](https://github.com/OWNER/REPO/actions/workflows/build-on-push.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/DOCKERHUB_USER/IMAGE_NAME.svg)](https://hub.docker.com/r/DOCKERHUB_USER/IMAGE_NAME)
+[![Workflow: build-on-push](https://img.shields.io/github/actions/workflow/status/maximsachs/pyannote_fastapi/build-on-push.yml?branch=main&label=build)](https://github.com/maximsachs/pyannote_fastapi/actions/workflows/build-on-push.yml)
+[![Docker Pulls](https://img.shields.io/docker/pulls/maximsachs/pyannote_fastapi.svg)](https://hub.docker.com/r/maximsachs/pyannote_fastapi)
+
+**Images:** `docker.io/maximsachs/pyannote_fastapi` and `ghcr.io/maximsachs/pyannote_fastapi`.
+
+**Base images (resolved automatically at build time):**
+- **CUDA** (`:latest` and `:<version>`): `pytorch/pytorch:<torch>-cuda<X.Y>-cudnn9-runtime`. CI runs `scripts/resolve-pytorch-base.sh`, which (a) reads pyannote.audio's `torch>=…` lower bound from its PyPI metadata and (b) picks the **lowest** available pytorch/pytorch tag that satisfies it, preferring CUDA 12.8. This keeps NVIDIA driver requirements as low as the pyannote release allows. Override at build time with `--build-arg PYTORCH_BASE=...` (or run the script with `TORCH_SELECT=max` for the newest available torch). Inspect the actual base used via `docker inspect <image> | jq '.[0].Config.Labels["org.opencontainers.image.base.name"]'`.
+- **CPU** (`:latest-cpu` and `:<version>-cpu`): `python:3.11-slim` + `torch` / `torchaudio` CPU wheels from `https://download.pytorch.org/whl/cpu` (always picks current stable, which satisfies the same lower bound).
 
 This repository ships a **minimal FastAPI** service around **[pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)**: it loads the pipeline once at startup, exposes a small HTTP API with Prometheus metrics, and publishes **CUDA** and **CPU** images that contain **application code only** — **not** redistributed model weights.
 
@@ -64,7 +70,7 @@ docker run --rm -it --gpus all \
   -e HF_TOKEN="replace-me" \
   -v pyannote_hf_cache:/opt/huggingface \
   -p 8000:8000 \
-  ghcr.io/OWNER/REPO:latest
+  ghcr.io/maximsachs/pyannote_fastapi:latest
 ```
 
 ```bash
