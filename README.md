@@ -2,7 +2,11 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Workflow: build-on-push](https://img.shields.io/github/actions/workflow/status/maximsachs/pyannote_fastapi/build-on-push.yml?branch=main&label=build)](https://github.com/maximsachs/pyannote_fastapi/actions/workflows/build-on-push.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/maximsachs/pyannote_fastapi.svg)](https://hub.docker.com/r/maximsachs/pyannote_fastapi)
+[![Docker Pulls](https://img.shields.io/docker/pulls/maximsachs/pyannote_fastapi.svg)](https://hub.docker.com/repository/docker/maximfilms/pyannote_fastapi)
+
+<!-- pyannote-version:start -->
+**Latest published images build against `pyannote.audio` (not yet released by automation).**
+<!-- pyannote-version:end -->
 
 A minimal FastAPI service around [**pyannote/speaker-diarization-community-1**](https://huggingface.co/pyannote/speaker-diarization-community-1). The pipeline is loaded once at startup; diarization requests are queued to in-process workers and streamed back to the client as Server-Sent Events with periodic heartbeats and a final result frame.
 
