@@ -203,9 +203,12 @@ Lower values give snappier disconnect detection (the server polls `request.is_di
 
 | Name | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `pyannote_requests_total` | counter | `endpoint`, `status` | HTTP requests processed. SSE responses always count as `status="200"`. |
-| `pyannote_diarization_duration_seconds` | histogram | — | Wall time of the pyannote inference call. |
-| `pyannote_audio_duration_seconds` | histogram | — | Length of input audio. |
-| `pyannote_active_requests` | gauge | — | Jobs currently being processed by a worker (does not include queued jobs). |
+| `pyannote_requests_total` | counter | `endpoint`, `status` | HTTP requests processed. SSE responses always count as `status="200"` regardless of in-stream outcome — use `pyannote_sse_results_total` for application-level success/error rate. |
+| `pyannote_sse_results_total` | counter | `outcome` (`success` \| `error`) | Terminal SSE events emitted by `/diarize`. Counts the `result` and `error` frames; client disconnects mid-stream are not counted. |
+| `pyannote_diarization_duration_seconds` | histogram | — | Wall time of the pyannote inference call only (excludes upload and queue wait). Buckets: `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800` s. |
+| `pyannote_audio_duration_seconds` | histogram | — | Length of input audio. Buckets: `1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600` s. |
+| `pyannote_realtime_factor` | histogram | — | `diarization_seconds / audio_seconds`. Values <1 mean faster than realtime; key capacity-planning metric. Buckets: `0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30`. |
+| `pyannote_queue_depth` | gauge | — | Jobs currently waiting in the queue (excludes the one being processed). Compare against `MAX_QUEUE_DEPTH` to detect backpressure. |
+| `pyannote_active_requests` | gauge | — | Jobs currently being processed by a worker. Sum with `pyannote_queue_depth` for total in-flight load. |
 | `pyannote_model_loaded` | gauge | — | `1` after the pipeline is loaded, `0` during startup / shutdown. |
 | `pyannote` | info | `version`, `model_id`, `torch_version`, `cuda_available` | Static build/runtime info. |

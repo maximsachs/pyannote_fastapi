@@ -56,20 +56,37 @@ REQUESTS_TOTAL = Counter(
 )
 DIARIZATION_SECONDS = Histogram(
     "pyannote_diarization_duration_seconds",
-    "Wall time spent in diarization (excluding upload I/O)",
-    buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, float("inf")),
+    "Wall time spent in the pyannote inference call (excluding upload and queue wait)",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0),
 )
 AUDIO_DURATION_SECONDS = Histogram(
     "pyannote_audio_duration_seconds",
     "Input audio duration in seconds",
-    buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 2400.0, float("inf")),
+    buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0),
 )
-ACTIVE_REQUESTS = Gauge("pyannote_active_requests", "Requests currently in-flight")
+REALTIME_FACTOR = Histogram(
+    "pyannote_realtime_factor",
+    "Inference wall time divided by audio duration (lower is faster; <1 = faster than realtime)",
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
+)
+SSE_RESULTS_TOTAL = Counter(
+    "pyannote_sse_results_total",
+    "Terminal SSE events emitted by /diarize",
+    labelnames=("outcome",),
+)
+QUEUE_DEPTH = Gauge(
+    "pyannote_queue_depth",
+    "Jobs currently waiting in the diarization queue (excludes jobs being processed)",
+)
+ACTIVE_REQUESTS = Gauge("pyannote_active_requests", "Jobs currently being processed by a worker")
 MODEL_LOADED = Gauge("pyannote_model_loaded", "Whether the diarization pipeline is loaded (1=yes)")
 PYANNOTE_BUILD = Info(
     "pyannote",
     "Static build/runtime information for the diarization service",
 )
+
+SSE_RESULTS_TOTAL.labels(outcome="success")
+SSE_RESULTS_TOTAL.labels(outcome="error")
 
 _BEARER_SCHEME = HTTPBearer(bearerFormat="API key", auto_error=False)
 
@@ -280,7 +297,10 @@ def _run_diarization_sync(tmp_path: Path, params: _DiarizationParams) -> Diarize
 
     t_infer0 = time.monotonic()
     raw_out = _pipeline({"waveform": waveform, "sample_rate": sample_rate}, **infer_kwargs)
-    DIARIZATION_SECONDS.observe(time.monotonic() - t_infer0)
+    inference_seconds = time.monotonic() - t_infer0
+    DIARIZATION_SECONDS.observe(inference_seconds)
+    if audio_duration > 0:
+        REALTIME_FACTOR.observe(inference_seconds / audio_duration)
 
     try:
         diarization = _extract_diarization_output(raw_out, exclusive=params.exclusive)
@@ -306,6 +326,7 @@ async def _worker(worker_id: int) -> None:
     assert _JOB_QUEUE is not None
     while True:
         job = await _JOB_QUEUE.get()
+        QUEUE_DEPTH.dec()
         ACTIVE_REQUESTS.inc()
         try:
             await job.events.put({"type": "status", "phase": "running", "worker": worker_id})
@@ -477,6 +498,7 @@ async def diarize(
     job = _Job(tmp_path=tmp_path, params=params)
     try:
         _JOB_QUEUE.put_nowait(job)
+        QUEUE_DEPTH.inc()
     except asyncio.QueueFull as exc:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -530,9 +552,11 @@ async def diarize(
                     {"job_id": job.id, "phase": phase, "worker": event.get("worker")},
                 )
             elif kind == "result":
+                SSE_RESULTS_TOTAL.labels(outcome="success").inc()
                 yield _sse_frame("result", {"job_id": job.id, **event["data"]})
                 return
             elif kind == "error":
+                SSE_RESULTS_TOTAL.labels(outcome="error").inc()
                 yield _sse_frame(
                     "error",
                     {"job_id": job.id, "status": event["status"], "detail": event["detail"]},

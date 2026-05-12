@@ -137,5 +137,58 @@ else
   echo "${RESULT_JSON}"
 fi
 
+echo "==> GET /metrics"
+METRICS_FILE="$(mktemp)"
+METRICS_CODE="$(curl -sS -o "${METRICS_FILE}" -w '%{http_code}' \
+  "http://127.0.0.1:${HOST_PORT}/metrics")"
+
+if [ "${METRICS_CODE}" != "200" ]; then
+  echo "ERROR: /metrics returned ${METRICS_CODE}" >&2
+  cat "${METRICS_FILE}" >&2
+  rm -f "${METRICS_FILE}"
+  exit 1
+fi
+
+REQUIRED_METRICS=(
+  "pyannote_requests_total"
+  "pyannote_sse_results_total"
+  "pyannote_diarization_duration_seconds"
+  "pyannote_audio_duration_seconds"
+  "pyannote_realtime_factor"
+  "pyannote_queue_depth"
+  "pyannote_active_requests"
+  "pyannote_model_loaded"
+)
+missing=0
+for metric in "${REQUIRED_METRICS[@]}"; do
+  if ! grep -q "^${metric}" "${METRICS_FILE}"; then
+    echo "ERROR: /metrics missing series ${metric}" >&2
+    missing=1
+  fi
+done
+
+if ! grep -Eq '^pyannote_requests_total\{[^}]*endpoint="/diarize"[^}]*status="200"[^}]*\} [1-9][0-9]*(\.[0-9]+)?$' "${METRICS_FILE}"; then
+  echo "ERROR: /metrics has no successful /diarize counter increment" >&2
+  grep '^pyannote_requests_total' "${METRICS_FILE}" >&2 || true
+  missing=1
+fi
+
+if ! grep -Eq '^pyannote_sse_results_total\{outcome="success"\} [1-9][0-9]*(\.[0-9]+)?$' "${METRICS_FILE}"; then
+  echo "ERROR: /metrics has no successful SSE outcome counted" >&2
+  grep '^pyannote_sse_results_total' "${METRICS_FILE}" >&2 || true
+  missing=1
+fi
+
+if [ "${missing}" -ne 0 ]; then
+  rm -f "${METRICS_FILE}"
+  exit 1
+fi
+
+echo "    /metrics OK (expected series present, /diarize counter incremented)"
+echo "----- /metrics excerpt -----"
+grep '^pyannote_' "${METRICS_FILE}" | head -20
+echo "----------------------------"
+rm -f "${METRICS_FILE}"
+
 echo
 echo "==> Smoke test passed."

@@ -23,7 +23,7 @@ jobs:
       IMAGE_NAME: pyannote_fastapi
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -89,18 +89,18 @@ jobs:
 
       - name: Set up Docker Buildx
         if: ${{ steps.dh.outputs.http_code != '200' }}
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         if: ${{ steps.dh.outputs.http_code != '200' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GHCR
         if: ${{ steps.dh.outputs.http_code != '200' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -108,7 +108,7 @@ jobs:
 
       - name: Build and push (CUDA)
         if: ${{ steps.dh.outputs.http_code != '200' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -133,7 +133,7 @@ jobs:
 
       - name: Build and push (CPU)
         if: ${{ steps.dh.outputs.http_code != '200' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.cpu
