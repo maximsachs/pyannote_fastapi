@@ -155,18 +155,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         if: ${{ steps.dh.outputs.http_code != '200' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.pypi.outputs.version }}
+          MAJOR_MINOR: ${{ steps.pypi.outputs.major_minor }}
+          MAJOR: ${{ steps.pypi.outputs.major }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          BUILD_DATE: ${{ steps.pypi.outputs.build_date }}
         run: |
+          NOTES_FILE="$(mktemp)"
+          cat >"${NOTES_FILE}" <<EOF
+          Automated build for pyannote.audio ${VERSION} (built ${BUILD_DATE}).
+
+          Upstream changelog: https://github.com/pyannote/pyannote-audio/blob/main/CHANGELOG.md
+
+          ## Docker Hub
+
+          - https://hub.docker.com/r/${DOCKERHUB_USERNAME}/${IMAGE_NAME}/tags?name=${VERSION}
+          - \`docker pull ${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${VERSION}\` (CUDA)
+          - \`docker pull ${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${VERSION}-cpu\` (CPU)
+
+          Rolling tags also updated: \`${MAJOR_MINOR}\`, \`${MAJOR}\`, \`latest\` (and \`-cpu\` variants).
+
+          ## GHCR
+
+          - https://github.com/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}/pkgs/container/${IMAGE_NAME}
+          - \`docker pull ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}:${VERSION}\` (CUDA)
+          - \`docker pull ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}:${VERSION}-cpu\` (CPU)
+          EOF
+
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "GitHub Release v${VERSION} already exists."
+            echo "GitHub Release v${VERSION} already exists; updating notes."
+            gh release edit "v${VERSION}" \
+              --title "pyannote.audio ${VERSION}" \
+              --notes-file "${NOTES_FILE}"
           else
             gh release create "v${VERSION}" \
               --title "pyannote.audio ${VERSION}" \
-              --notes "Automated build for pyannote.audio ${VERSION}. Upstream changelog: https://github.com/pyannote/pyannote-audio/blob/main/CHANGELOG.md"
+              --notes-file "${NOTES_FILE}"
           fi
 
       - name: Update README with built pyannote.audio version

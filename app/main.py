@@ -118,6 +118,28 @@ SSE_HEARTBEAT_SECONDS = max(
 )
 MAX_QUEUE_DEPTH = max(1, int(os.environ.get("MAX_QUEUE_DEPTH", "64").strip() or "64"))
 
+# Opt-in telemetry. pyannote.audio ships an anonymous usage-metrics hook that is
+# enabled by default upstream; we disable it unless the operator explicitly
+# opts in via PYANNOTE_TELEMETRY=1.
+PYANNOTE_TELEMETRY_ENABLED = os.environ.get("PYANNOTE_TELEMETRY", "").strip() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
+def _configure_pyannote_telemetry() -> None:
+    try:
+        from pyannote.audio.telemetry import set_telemetry_metrics
+    except ImportError:
+        logger.debug("pyannote.audio.telemetry not available; skipping telemetry configuration.")
+        return
+    set_telemetry_metrics(PYANNOTE_TELEMETRY_ENABLED)
+    logger.info(
+        "pyannote_telemetry enabled=%s (set PYANNOTE_TELEMETRY=1 to opt in)",
+        PYANNOTE_TELEMETRY_ENABLED,
+    )
+
 
 class SegmentModel(BaseModel):
     start: float
@@ -194,6 +216,7 @@ def _load_pipeline() -> Any:
     if _is_testing():
         logger.warning("PYANNOTE_TESTING is enabled; using dry-run pipeline.")
         return _DryRunPipeline()
+    _configure_pyannote_telemetry()
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     local_dir = _local_pipeline_dir()
     if local_dir is not None:

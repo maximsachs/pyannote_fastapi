@@ -34,6 +34,7 @@ The upstream pipeline is **CC-BY-4.0** and **gated** on Hugging Face. This image
 | `MAX_QUEUE_DEPTH` | no | `64` | Max number of jobs that may be queued. Further requests are rejected with `503 {"error":"queue_full"}` and a `Retry-After: 5` header. |
 | `SSE_HEARTBEAT_SECONDS` | no | `5` | Interval between SSE `heartbeat` frames while a job is queued or running. |
 | `LOG_LEVEL` | no | `INFO` | Python logging level. |
+| `PYANNOTE_TELEMETRY` | no | `0` | Set to `1`/`true`/`yes` to opt in to upstream pyannote.audio anonymous usage telemetry. Disabled by default. |
 
 ## Quick start
 
