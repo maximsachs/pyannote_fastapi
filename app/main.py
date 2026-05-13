@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -200,11 +198,7 @@ def _rate_limit_ip_key(request: Request) -> str:
 limiter = Limiter(
     key_func=_rate_limit_key,
     storage_uri=RATE_LIMIT_STORAGE_URI,
-    # headers_enabled would inject X-RateLimit-* headers, but slowapi requires
-    # the endpoint to return (or accept) a starlette Response for that to work,
-    # which breaks dict-returning endpoints like /live. Our 429 handler sets
-    # Retry-After explicitly, so we don't need the extra headers.
-    headers_enabled=False,
+    headers_enabled=True,
 )
 
 
@@ -490,7 +484,7 @@ async def _worker(worker_id: int) -> None:
                     )
                 else:
                     result = await infer_future
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 LEAKED_INFERENCE_THREADS.inc()
                 infer_future.add_done_callback(
                     lambda _f: LEAKED_INFERENCE_THREADS.dec()
@@ -628,13 +622,13 @@ async def count_requests(
 
 @app.get("/live")
 @limiter.limit(RATE_LIMIT_LIVE)
-async def live(request: Request) -> dict[str, str]:
+async def live(request: Request, response: Response) -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/health")
 @limiter.limit(RATE_LIMIT_HEALTH)
-async def health(request: Request) -> JSONResponse:
+async def health(request: Request, response: Response) -> JSONResponse:
     ready = bool(getattr(request.app.state, "ready", False))
     if not ready:
         return JSONResponse(status_code=503, content={"status": "not_ready"})
@@ -643,7 +637,7 @@ async def health(request: Request) -> JSONResponse:
 
 @app.get("/metrics")
 @limiter.limit(RATE_LIMIT_METRICS)
-async def metrics(request: Request) -> Response:
+async def metrics(request: Request, response: Response) -> Response:
     payload = generate_latest(REGISTRY)
     return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
 
@@ -654,6 +648,7 @@ async def metrics(request: Request) -> Response:
 async def diarize(
     _auth: Annotated[None, Depends(_require_api_key)],
     request: Request,
+    response: Response,
     file: Annotated[UploadFile, File(..., description="Audio file")],
     num_speakers: Annotated[int | None, Query()] = None,
     min_speakers: Annotated[int | None, Query()] = None,
@@ -756,7 +751,7 @@ async def diarize(
                 event = await asyncio.wait_for(
                     job.events.get(), timeout=SSE_HEARTBEAT_SECONDS
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 yield _sse_frame(
                     "heartbeat",
                     {
