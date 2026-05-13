@@ -33,8 +33,33 @@ The upstream pipeline is **CC-BY-4.0** and **gated** on Hugging Face. This image
 | `DIARIZE_WORKERS` | no | `1` | Concurrent diarization workers. Keep at `1` for single-GPU setups. |
 | `MAX_QUEUE_DEPTH` | no | `64` | Max number of jobs that may be queued. Further requests are rejected with `503 {"error":"queue_full"}` and a `Retry-After: 5` header. |
 | `SSE_HEARTBEAT_SECONDS` | no | `5` | Interval between SSE `heartbeat` frames while a job is queued or running. |
+| `MAX_UPLOAD_BYTES` | no | `2147483648` (2 GiB) | Hard cap on the request body size for `/diarize`. Oversized uploads are aborted mid-stream with `413 {"error":"upload_too_large"}`. |
+| `MAX_AUDIO_SECONDS` | no | `43200` (12 h) | Hard cap on decoded audio duration. Longer clips are rejected with `413 {"error":"audio_too_long"}` after decode. |
+| `INFERENCE_TIMEOUT_SECONDS` | no | `7200` | Soft per-request inference timeout. On expiry the queue slot is freed and the client receives a `504 diarization_timeout` SSE event. The underlying thread keeps running until pyannote returns; track via `pyannote_leaked_inference_threads`. Set `0` to disable. |
+| `AUTH_FAIL_DELAY_SECONDS` | no | `0.5` | Delay added to `401` responses to slow credential stuffing. |
+| `RATE_LIMIT_DIARIZE` | no | `10/minute` | Per-API-key (or per-IP if no Bearer token) rate limit for `POST /diarize`. |
+| `RATE_LIMIT_DIARIZE_IP` | no | `20/minute` | Per-IP rate limit for `POST /diarize`, applied **in addition** to `RATE_LIMIT_DIARIZE` (defends against attackers rotating Bearer tokens). |
+| `RATE_LIMIT_LIVE` | no | `120/minute` | Per-IP rate limit for `GET /live`. |
+| `RATE_LIMIT_HEALTH` | no | `120/minute` | Per-IP rate limit for `GET /health`. |
+| `RATE_LIMIT_METRICS` | no | `60/minute` | Per-IP rate limit for `GET /metrics`. |
+| `RATE_LIMIT_STORAGE_URI` | no | `memory://` | slowapi storage URI. Use e.g. `redis://host:6379` to share limits across replicas. |
 | `LOG_LEVEL` | no | `INFO` | Python logging level. |
 | `PYANNOTE_TELEMETRY` | no | `0` | Set to `1`/`true`/`yes` to opt in to upstream pyannote.audio anonymous usage telemetry. Disabled by default. |
+
+### Client IP detection
+
+Rate limits and audit logs key off the originating client IP, resolved in this priority order:
+
+1. `cf-connecting-ip` (Cloudflare proxy / tunnel)
+2. `x-real-ip`
+3. First hop of `x-forwarded-for`
+4. The direct socket peer
+
+If you deploy this image **without** a trusted proxy in front, anyone on the internet can spoof these headers. Lock the origin down so only your reverse proxy / Cloudflare egress IPs can reach the pod.
+
+### Audit logging
+
+The service emits a `WARNING`-level structured log line for security-relevant events: `auth_failed`, `rate_limited`, and `upload_too_large`. Each line contains `ip`, `path`, `method`, `key=<first-4-chars>***`, `ua`, `cf_ray`, and `cf_country`, so you can correlate with Cloudflare logs.
 
 ## Quick start
 

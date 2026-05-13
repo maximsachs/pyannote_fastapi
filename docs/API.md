@@ -29,6 +29,29 @@ Unauthenticated calls return `401`:
 { "detail": { "error": "unauthorized" } }
 ```
 
+A small server-side delay (`AUTH_FAIL_DELAY_SECONDS`, default `0.5 s`) is added to every `401` response to slow credential-stuffing attacks. Each failure also emits a structured `audit_event=auth_failed` log line including the originating IP, the first 4 characters of the presented token (if any), the user-agent, and the Cloudflare `cf-ray` / `cf-ipcountry` headers.
+
+## Rate limits
+
+All endpoints are rate limited. The limit key is the API key for authenticated requests (`Authorization: Bearer …`) and the originating client IP otherwise. `POST /diarize` additionally enforces an independent per-IP cap that always applies, so an attacker rotating Bearer tokens cannot bypass the limit.
+
+| Endpoint | Default limit | Env var(s) |
+| --- | --- | --- |
+| `POST /diarize` | `10/minute` per key + `20/minute` per IP | `RATE_LIMIT_DIARIZE`, `RATE_LIMIT_DIARIZE_IP` |
+| `GET /live` | `120/minute` per IP | `RATE_LIMIT_LIVE` |
+| `GET /health` | `120/minute` per IP | `RATE_LIMIT_HEALTH` |
+| `GET /metrics` | `60/minute` per IP | `RATE_LIMIT_METRICS` |
+
+When a limit is exceeded the server responds with:
+
+- **Status:** `429`
+- **Headers:** `Retry-After: 1`, plus the standard `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset` headers.
+- **Body:** `{"error":"rate_limited","detail":"<limit string that was breached>"}`
+
+The originating client IP is resolved from `cf-connecting-ip` → `x-real-ip` → first hop of `x-forwarded-for` → socket peer. Deploy behind a trusted proxy (Cloudflare, ingress, etc.) so these headers cannot be spoofed.
+
+For multi-replica deployments set `RATE_LIMIT_STORAGE_URI=redis://…` so limits are shared across pods; the default `memory://` is per-process.
+
 ## `POST /diarize`
 
 ### Request
@@ -58,7 +81,9 @@ The following errors are returned before the SSE stream begins, with a normal JS
 
 | Status | `detail.error` | Headers | Meaning | Recommended client action |
 | --- | --- | --- | --- | --- |
-| `401` | `unauthorized` | — | Missing or invalid `Authorization: Bearer` header. | Fix the key. Do not retry. |
+| `401` | `unauthorized` | — | Missing or invalid `Authorization: Bearer` header. Response is delayed by `AUTH_FAIL_DELAY_SECONDS` (default `0.5 s`). | Fix the key. Do not retry. |
+| `413` | `upload_too_large` | — | Request body exceeded `MAX_UPLOAD_BYTES` (default 2 GiB). The upload is aborted mid-stream. Detail includes `max_bytes`. | Re-encode / split the file. Do not retry as-is. |
+| `429` | `rate_limited` | `Retry-After: 1`, `X-RateLimit-*` | Per-key or per-IP rate limit was exceeded. Detail field is the limit string that was breached. | Honour `Retry-After`. Back off exponentially on repeated 429s. |
 | `503` | `pipeline_not_loaded` | — | The container is up but the pipeline is still initialising (cold start, model download). | Retry with exponential backoff; `/health` will be `200` once ready. |
 | `503` | `queue_full` | `Retry-After: 5` | The in-process queue has reached `MAX_QUEUE_DEPTH` (default `64`). | Honour `Retry-After`, then retry. Detail payload includes `max_queue_depth`. |
 | `422` | (FastAPI validation) | — | Missing `file` field, invalid query parameter type, etc. | Fix the request; do not retry as-is. |
@@ -148,8 +173,10 @@ Terminal failure event during processing. The stream closes immediately after.
 | `status` | `detail.error` | Meaning | Recommended client action |
 | --- | --- | --- | --- |
 | `400` | `invalid_audio` | The uploaded file decoded to an unexpected shape (e.g. zero-dimensional tensor). | Validate the file locally before retrying. |
+| `413` | `audio_too_long` | Decoded audio duration exceeded `MAX_AUDIO_SECONDS` (default 12 h). Detail includes `duration_seconds` and `max_seconds`. | Split the audio into shorter chunks. |
 | `500` | `diarization_output_parse_failed` | The pyannote pipeline returned a structure this service did not recognise (typically a version skew). | Open an issue; retrying is unlikely to help. |
 | `500` | `diarization_failed` | An unexpected runtime error from `torchaudio` / `pyannote` / `torch` (file decode failure, CUDA OOM, etc.). | Inspect server logs. Retry once after backoff; if persistent, treat as a server-side bug. |
+| `504` | `diarization_timeout` | Inference exceeded `INFERENCE_TIMEOUT_SECONDS` (default `7200`). The queue slot is freed immediately so other requests proceed; the underlying thread keeps running until pyannote returns. Detail includes `timeout_seconds`. | Retry with shorter audio. Operators: alert on `pyannote_leaked_inference_threads`. |
 
 The `status` field mirrors the HTTP status this error *would* have produced if it had happened before the stream started. It is informational; the actual HTTP status is always `200` for any response that reached the SSE phase.
 
@@ -177,6 +204,24 @@ Maximum number of jobs that may sit in the queue (excluding the one currently be
 
 Sizing guidance: keep this small enough that the worst-case queue wait (`MAX_QUEUE_DEPTH * avg_processing_time / DIARIZE_WORKERS`) is shorter than your upstream client/LB timeout. With a 30 s average job and one worker, `MAX_QUEUE_DEPTH=64` implies up to ~32 minutes of queue wait for the unluckiest caller — set it lower if your clients are less patient.
 
+### `MAX_UPLOAD_BYTES` (default: `2147483648` = 2 GiB)
+
+Hard cap on the request body for `POST /diarize`. The check runs inside the chunked read loop, so an oversized upload is aborted as soon as the cap is crossed (it is not buffered to completion). The temp file is unlinked and the server responds with `413 {"error":"upload_too_large","max_bytes":N}`. Configure the same or stricter limit at your reverse proxy / Cloudflare.
+
+### `MAX_AUDIO_SECONDS` (default: `43200` = 12 h)
+
+Hard cap on decoded audio duration. Enforced after `torchaudio.load` returns, so a small but highly-compressed file that decodes into hours of audio will still be rejected. Returns the SSE error `{"status":504,"detail":{"error":"audio_too_long",...}}` once a worker picks the job up.
+
+### `INFERENCE_TIMEOUT_SECONDS` (default: `7200` = 2 h, set `0` to disable)
+
+Soft per-request inference timeout. On expiry:
+
+- The queue slot is freed and `ACTIVE_REQUESTS` decrements, so new jobs can start.
+- The client receives an SSE `error` event with `status: 504` and `detail.error: "diarization_timeout"`.
+- The underlying OS thread continues running until pyannote returns naturally (Python cannot kill a running thread). The leaked thread is tracked by the `pyannote_leaked_inference_threads` gauge for the duration.
+
+This is a deliberate trade-off: a true hard kill would require a `ProcessPoolExecutor`, which would multiply GPU VRAM usage per worker. For well-behaved input bounded by `MAX_AUDIO_SECONDS`, the soft timeout combined with leak observability + pod recycling on sustained leaks is sufficient.
+
 ### `SSE_HEARTBEAT_SECONDS` (default: `5`)
 
 Interval between `heartbeat` frames. Must be lower than:
@@ -194,7 +239,7 @@ Lower values give snappier disconnect detection (the server polls `request.is_di
 4. **Stream the response.** Do not buffer the full body before parsing — the heartbeats are the *point*. Use an HTTP client that exposes a byte/line stream (`fetch` + `ReadableStream`, `httpx.stream`, `requests` with `stream=True`, etc.). Browser `EventSource` cannot be used directly because it does not support `POST` with multipart bodies.
 5. **Parse SSE properly.** Split on blank lines (`\n\n`), then extract `event:` and `data:` lines per block. The `data:` payload is always single-line JSON in this service.
 6. **Distinguish stream events from transport errors.** A successful HTTP response that ends without a `result` or `error` event means the TCP connection was dropped (timeout, server crash, …); treat it as retryable. A `result` event means success even though the HTTP status was already `200` from the start. An `error` event means application-level failure — check the table above to decide whether to retry.
-7. **Honour your own timeouts on `elapsed_seconds`.** The server will not time out long jobs; if you need a ceiling, close the connection client-side and the server will detect the disconnect on its next heartbeat tick (the worker still finishes the in-flight job, since pyannote inference is not cancellable, but no result is delivered to you).
+7. **Honour your own timeouts on `elapsed_seconds`.** The server enforces `INFERENCE_TIMEOUT_SECONDS` (default 2 h) and audio is capped at `MAX_AUDIO_SECONDS` (default 12 h), but you should still apply a tighter client-side ceiling appropriate to your UX. Closing the connection client-side is detected on the next heartbeat tick; pyannote inference is not cancellable, so the worker finishes the in-flight job but no result is delivered to you.
 8. **Log `job_id`.** Every event carries it; pairing it with server logs (`grep <job_id>`) is the fastest way to debug a stuck or failing request.
 
 ## Metrics (Prometheus)
@@ -210,5 +255,6 @@ Lower values give snappier disconnect detection (the server polls `request.is_di
 | `pyannote_realtime_factor` | histogram | — | `diarization_seconds / audio_seconds`. Values <1 mean faster than realtime; key capacity-planning metric. Buckets: `0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30`. |
 | `pyannote_queue_depth` | gauge | — | Jobs currently waiting in the queue (excludes the one being processed). Compare against `MAX_QUEUE_DEPTH` to detect backpressure. |
 | `pyannote_active_requests` | gauge | — | Jobs currently being processed by a worker. Sum with `pyannote_queue_depth` for total in-flight load. |
+| `pyannote_leaked_inference_threads` | gauge | — | Inference threads still running after `INFERENCE_TIMEOUT_SECONDS` expired. Decrements when the underlying pyannote call eventually returns. Sustained non-zero values indicate the model is getting stuck — alert on this and recycle the pod. Suggested rules: warn if `> 0` for 5 min, restart if `>= DIARIZE_WORKERS` for 1 min. |
 | `pyannote_model_loaded` | gauge | — | `1` after the pipeline is loaded, `0` during startup / shutdown. |
 | `pyannote` | info | `version`, `model_id`, `torch_version`, `cuda_available` | Static build/runtime info. |
