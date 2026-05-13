@@ -200,7 +200,11 @@ def _rate_limit_ip_key(request: Request) -> str:
 limiter = Limiter(
     key_func=_rate_limit_key,
     storage_uri=RATE_LIMIT_STORAGE_URI,
-    headers_enabled=True,
+    # headers_enabled would inject X-RateLimit-* headers, but slowapi requires
+    # the endpoint to return (or accept) a starlette Response for that to work,
+    # which breaks dict-returning endpoints like /live. Our 429 handler sets
+    # Retry-After explicitly, so we don't need the extra headers.
+    headers_enabled=False,
 )
 
 

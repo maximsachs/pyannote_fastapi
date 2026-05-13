@@ -45,7 +45,7 @@ All endpoints are rate limited. The limit key is the API key for authenticated r
 When a limit is exceeded the server responds with:
 
 - **Status:** `429`
-- **Headers:** `Retry-After: 1`, plus the standard `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset` headers.
+- **Headers:** `Retry-After: 1`.
 - **Body:** `{"error":"rate_limited","detail":"<limit string that was breached>"}`
 
 The originating client IP is resolved from `cf-connecting-ip` → `x-real-ip` → first hop of `x-forwarded-for` → socket peer. Deploy behind a trusted proxy (Cloudflare, ingress, etc.) so these headers cannot be spoofed.
@@ -83,7 +83,7 @@ The following errors are returned before the SSE stream begins, with a normal JS
 | --- | --- | --- | --- | --- |
 | `401` | `unauthorized` | — | Missing or invalid `Authorization: Bearer` header. Response is delayed by `AUTH_FAIL_DELAY_SECONDS` (default `0.5 s`). | Fix the key. Do not retry. |
 | `413` | `upload_too_large` | — | Request body exceeded `MAX_UPLOAD_BYTES` (default 2 GiB). The upload is aborted mid-stream. Detail includes `max_bytes`. | Re-encode / split the file. Do not retry as-is. |
-| `429` | `rate_limited` | `Retry-After: 1`, `X-RateLimit-*` | Per-key or per-IP rate limit was exceeded. Detail field is the limit string that was breached. | Honour `Retry-After`. Back off exponentially on repeated 429s. |
+| `429` | `rate_limited` | `Retry-After: 1` | Per-key or per-IP rate limit was exceeded. Detail field is the limit string that was breached. | Honour `Retry-After`. Back off exponentially on repeated 429s. |
 | `503` | `pipeline_not_loaded` | — | The container is up but the pipeline is still initialising (cold start, model download). | Retry with exponential backoff; `/health` will be `200` once ready. |
 | `503` | `queue_full` | `Retry-After: 5` | The in-process queue has reached `MAX_QUEUE_DEPTH` (default `64`). | Honour `Retry-After`, then retry. Detail payload includes `max_queue_depth`. |
 | `422` | (FastAPI validation) | — | Missing `file` field, invalid query parameter type, etc. | Fix the request; do not retry as-is. |
