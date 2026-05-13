@@ -23,6 +23,8 @@ HOST_PORT="${HOST_PORT:-8000}"
 CACHE_VOLUME="${CACHE_VOLUME:-pyannote_hf_cache}"
 API_KEY="${API_KEY:-test-key-$RANDOM}"
 READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-900}"
+PARALLEL_REQUESTS="${PARALLEL_REQUESTS:-5}"
+QUEUE_SAMPLE_INTERVAL="${QUEUE_SAMPLE_INTERVAL:-0.5}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
@@ -137,6 +139,85 @@ else
   echo "${RESULT_JSON}"
 fi
 
+echo "==> Firing ${PARALLEL_REQUESTS} parallel /diarize requests"
+PARALLEL_DIR="$(mktemp -d)"
+pids=()
+for i in $(seq 1 "${PARALLEL_REQUESTS}"); do
+  (
+    code="$(curl -sS -N -o "${PARALLEL_DIR}/resp-${i}.sse" -w '%{http_code}' \
+      -H "Authorization: Bearer ${API_KEY}" \
+      -H "Accept: text/event-stream" \
+      -F "file=@${AUDIO}" \
+      "http://127.0.0.1:${HOST_PORT}/diarize")"
+    printf '%s\n' "${code}" > "${PARALLEL_DIR}/code-${i}.txt"
+  ) &
+  pids+=("$!")
+done
+
+echo "==> Sampling queue depth while jobs run"
+max_queue=0
+max_active=0
+while :; do
+  alive=0
+  for pid in "${pids[@]}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      alive=1
+      break
+    fi
+  done
+
+  sample="$(curl -sS "http://127.0.0.1:${HOST_PORT}/metrics" \
+    | grep -E '^(pyannote_queue_depth|pyannote_active_requests) ' || true)"
+  qd="$(printf '%s\n' "${sample}" | awk '/^pyannote_queue_depth /{print $2}')"
+  ar="$(printf '%s\n' "${sample}" | awk '/^pyannote_active_requests /{print $2}')"
+  qd="${qd:-0}"
+  ar="${ar:-0}"
+  qd_int="${qd%.*}"
+  ar_int="${ar%.*}"
+  [ "${qd_int}" -gt "${max_queue}" ] && max_queue="${qd_int}"
+  [ "${ar_int}" -gt "${max_active}" ] && max_active="${ar_int}"
+  echo "    [$(date -u +%H:%M:%S)] queue_depth=${qd} active=${ar}"
+
+  if [ "${alive}" -eq 0 ]; then
+    break
+  fi
+  sleep "${QUEUE_SAMPLE_INTERVAL}"
+done
+
+for pid in "${pids[@]}"; do
+  wait "${pid}"
+done
+
+echo "==> Per-request results"
+parallel_fail=0
+for i in $(seq 1 "${PARALLEL_REQUESTS}"); do
+  code="$(cat "${PARALLEL_DIR}/code-${i}.txt")"
+  if [ "${code}" != "200" ]; then
+    echo "    request ${i}: HTTP ${code} (FAIL)"
+    parallel_fail=1
+    continue
+  fi
+  if grep -q '^event: result$' "${PARALLEL_DIR}/resp-${i}.sse"; then
+    echo "    request ${i}: HTTP 200, result event received"
+  else
+    echo "    request ${i}: HTTP 200 but no result event (FAIL)"
+    parallel_fail=1
+  fi
+done
+rm -rf "${PARALLEL_DIR}"
+
+echo "    observed max queue_depth=${max_queue}, max active=${max_active}"
+if [ "${PARALLEL_REQUESTS}" -gt 1 ] && [ "${max_queue}" -eq 0 ]; then
+  echo "WARNING: queue_depth never observed > 0; sampling may have been too slow," >&2
+  echo "         or the worker drained jobs faster than the sample interval." >&2
+fi
+
+if [ "${parallel_fail}" -ne 0 ]; then
+  echo "ERROR: at least one parallel /diarize call failed" >&2
+  docker logs "${CONTAINER_NAME}" | tail -80 >&2
+  exit 1
+fi
+
 echo "==> GET /metrics"
 METRICS_FILE="$(mktemp)"
 METRICS_CODE="$(curl -sS -o "${METRICS_FILE}" -w '%{http_code}' \
@@ -185,10 +266,11 @@ if [ "${missing}" -ne 0 ]; then
 fi
 
 echo "    /metrics OK (expected series present, /diarize counter incremented)"
-echo "----- /metrics excerpt -----"
-grep '^pyannote_' "${METRICS_FILE}" | head -20
-echo "----------------------------"
+echo "----- final /metrics (pyannote_* series, _bucket lines suppressed) -----"
+grep '^pyannote_' "${METRICS_FILE}" | grep -v '_bucket{' || true
+echo "------------------------------------------------------------------------"
 rm -f "${METRICS_FILE}"
 
 echo
-echo "==> Smoke test passed."
+expected_total=$(( PARALLEL_REQUESTS + 1 ))
+echo "==> Smoke test passed (1 sequential + ${PARALLEL_REQUESTS} parallel = ${expected_total} successful /diarize calls)."
