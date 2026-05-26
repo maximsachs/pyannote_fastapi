@@ -40,6 +40,8 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 
+import chunked_upload
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -531,6 +533,100 @@ def _sse_frame(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
 
 
+async def _enqueue_diarization_job(
+    tmp_path: Path,
+    params: _DiarizationParams,
+    *,
+    queue_full_status: int = 503,
+) -> _Job:
+    if _pipeline is None or _JOB_QUEUE is None:
+        raise HTTPException(status_code=503, detail={"error": "pipeline_not_loaded"})
+
+    if _JOB_QUEUE.full():
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            logger.warning("Could not delete temp upload %s: %s", tmp_path, unlink_exc)
+        logger.warning(
+            "queue_full reject depth=%d max=%d",
+            _JOB_QUEUE.qsize(),
+            MAX_QUEUE_DEPTH,
+        )
+        raise HTTPException(
+            status_code=queue_full_status,
+            detail={"error": "queue_full", "max_queue_depth": MAX_QUEUE_DEPTH},
+            headers={"Retry-After": "5"},
+        )
+
+    job = _Job(tmp_path=tmp_path, params=params)
+    try:
+        _JOB_QUEUE.put_nowait(job)
+        QUEUE_DEPTH.inc()
+    except asyncio.QueueFull as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            logger.warning("Could not delete temp upload %s: %s", tmp_path, unlink_exc)
+        logger.warning(
+            "queue_full reject_after_prepare depth=%d max=%d",
+            _JOB_QUEUE.qsize(),
+            MAX_QUEUE_DEPTH,
+        )
+        raise HTTPException(
+            status_code=queue_full_status,
+            detail={"error": "queue_full", "max_queue_depth": MAX_QUEUE_DEPTH},
+            headers={"Retry-After": "5"},
+        ) from exc
+    logger.info(
+        "job_queued job=%s queue_depth=%d max=%d",
+        job.id,
+        _JOB_QUEUE.qsize(),
+        MAX_QUEUE_DEPTH,
+    )
+    return job
+
+
+async def _iter_diarization_sse(request: Request, job: _Job) -> AsyncIterator[bytes]:
+    t0 = time.monotonic()
+    phase = "queued"
+    yield _sse_frame("status", {"job_id": job.id, "phase": phase})
+    while True:
+        if await request.is_disconnected():
+            logger.info("client_disconnected job=%s phase=%s", job.id, phase)
+            return
+        try:
+            event = await asyncio.wait_for(job.events.get(), timeout=SSE_HEARTBEAT_SECONDS)
+        except TimeoutError:
+            yield _sse_frame(
+                "heartbeat",
+                {
+                    "job_id": job.id,
+                    "phase": phase,
+                    "elapsed_seconds": round(time.monotonic() - t0, 2),
+                },
+            )
+            continue
+
+        kind = event["type"]
+        if kind == "status":
+            phase = event["phase"]
+            yield _sse_frame(
+                "status",
+                {"job_id": job.id, "phase": phase, "worker": event.get("worker")},
+            )
+        elif kind == "result":
+            SSE_RESULTS_TOTAL.labels(outcome="success").inc()
+            yield _sse_frame("result", {"job_id": job.id, **event["data"]})
+            return
+        elif kind == "error":
+            SSE_RESULTS_TOTAL.labels(outcome="error").inc()
+            yield _sse_frame(
+                "error",
+                {"job_id": job.id, "status": event["status"], "detail": event["detail"]},
+            )
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _pipeline, _pyannote_version, _JOB_QUEUE
@@ -571,7 +667,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         MAX_QUEUE_DEPTH,
         SSE_HEARTBEAT_SECONDS,
     )
+    await chunked_upload.start_chunked_upload_background()
     yield
+    await chunked_upload.stop_chunked_upload_background()
     MODEL_LOADED.set(0)
     app.state.ready = False
     for task in _WORKER_TASKS:
@@ -713,76 +811,10 @@ async def diarize(
         max_speakers=max_speakers,
         exclusive=exclusive,
     )
-    job = _Job(tmp_path=tmp_path, params=params)
-    try:
-        _JOB_QUEUE.put_nowait(job)
-        QUEUE_DEPTH.inc()
-    except asyncio.QueueFull as exc:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError as unlink_exc:
-            logger.warning("Could not delete temp upload %s: %s", tmp_path, unlink_exc)
-        logger.warning(
-            "queue_full reject_after_upload depth=%d max=%d",
-            _JOB_QUEUE.qsize(),
-            MAX_QUEUE_DEPTH,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "queue_full", "max_queue_depth": MAX_QUEUE_DEPTH},
-            headers={"Retry-After": "5"},
-        ) from exc
-    logger.info(
-        "job_queued job=%s queue_depth=%d max=%d",
-        job.id,
-        _JOB_QUEUE.qsize(),
-        MAX_QUEUE_DEPTH,
-    )
-
-    async def event_stream() -> AsyncIterator[bytes]:
-        t0 = time.monotonic()
-        phase = "queued"
-        yield _sse_frame("status", {"job_id": job.id, "phase": phase})
-        while True:
-            if await request.is_disconnected():
-                logger.info("client_disconnected job=%s phase=%s", job.id, phase)
-                return
-            try:
-                event = await asyncio.wait_for(
-                    job.events.get(), timeout=SSE_HEARTBEAT_SECONDS
-                )
-            except TimeoutError:
-                yield _sse_frame(
-                    "heartbeat",
-                    {
-                        "job_id": job.id,
-                        "phase": phase,
-                        "elapsed_seconds": round(time.monotonic() - t0, 2),
-                    },
-                )
-                continue
-
-            kind = event["type"]
-            if kind == "status":
-                phase = event["phase"]
-                yield _sse_frame(
-                    "status",
-                    {"job_id": job.id, "phase": phase, "worker": event.get("worker")},
-                )
-            elif kind == "result":
-                SSE_RESULTS_TOTAL.labels(outcome="success").inc()
-                yield _sse_frame("result", {"job_id": job.id, **event["data"]})
-                return
-            elif kind == "error":
-                SSE_RESULTS_TOTAL.labels(outcome="error").inc()
-                yield _sse_frame(
-                    "error",
-                    {"job_id": job.id, "status": event["status"], "detail": event["detail"]},
-                )
-                return
+    job = await _enqueue_diarization_job(tmp_path, params)
 
     return StreamingResponse(
-        event_stream(),
+        _iter_diarization_sse(request, job),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -790,3 +822,14 @@ async def diarize(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+chunked_upload.configure_chunked_upload(
+    enqueue_diarization=_enqueue_diarization_job,
+    build_sse_stream=_iter_diarization_sse,
+    diarization_params_type=_DiarizationParams,
+)
+app.include_router(
+    chunked_upload.router,
+    dependencies=[Depends(_require_api_key)],
+)

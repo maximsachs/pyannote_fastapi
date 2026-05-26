@@ -18,6 +18,8 @@ venv/
 
 *.wav
 *.mp3
+*.opus
+*.ogg
 *.flac
 /tmp/
 

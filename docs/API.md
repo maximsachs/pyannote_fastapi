@@ -12,6 +12,13 @@ For setup, environment variables, and `docker run` examples see the [README](../
 | `GET` | `/health` | none | Readiness probe. `200` once the pipeline is loaded, `503` until then. |
 | `GET` | `/metrics` | none | Prometheus exposition (text/plain). |
 | `POST` | `/diarize` | Bearer | Submit an audio file and stream the diarization result over SSE. |
+| `GET` | `/diarize/capabilities` | Bearer | Chunked-upload limits and feature flags. |
+| `POST` | `/diarize/sessions` | Bearer | Create a chunked upload session. |
+| `PUT` | `/diarize/sessions/{upload_id}/chunks/{chunk_index}` | Bearer | Upload one raw chunk (`application/octet-stream`). |
+| `POST` | `/diarize/sessions/{upload_id}/complete` | Bearer | Reassemble WAV and stream diarization over SSE (same as `/diarize`). |
+| `DELETE` | `/diarize/sessions/{upload_id}` | Bearer | Abort session and delete partial data. |
+
+For large files behind a **~100 MB** request body limit (e.g. Cloudflare), use the chunked session flow. See [CHUNKED_UPLOAD.md](CHUNKED_UPLOAD.md).
 
 ## Authentication
 
