@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Workflow: build-on-push](https://img.shields.io/github/actions/workflow/status/maximsachs/pyannote_fastapi/build-on-push.yml?branch=main&label=build)](https://github.com/maximsachs/pyannote_fastapi/actions/workflows/build-on-push.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/maximsachs/pyannote_fastapi.svg)](https://hub.docker.com/repository/docker/maximfilms/pyannote_fastapi)
+[![Docker Pulls](https://img.shields.io/docker/pulls/maximfilms/pyannote_fastapi.svg)](https://hub.docker.com/r/maximfilms/pyannote_fastapi)
 
 <!-- pyannote-version:start -->
 **Latest published images build against `pyannote.audio` (not yet released by automation).**
@@ -10,7 +10,7 @@
 
 A minimal FastAPI service around [**pyannote/speaker-diarization-community-1**](https://huggingface.co/pyannote/speaker-diarization-community-1). The pipeline is loaded once at startup; diarization requests are queued to in-process workers and streamed back to the client as Server-Sent Events with periodic heartbeats and a final result frame.
 
-**Images:** `docker.io/maximsachs/pyannote_fastapi` and `ghcr.io/maximsachs/pyannote_fastapi` (CUDA `:latest`, CPU `:latest-cpu`).
+**Images:** [Docker Hub](https://hub.docker.com/r/maximfilms/pyannote_fastapi) (`docker.io/maximfilms/pyannote_fastapi`) and [GHCR](https://github.com/maximsachs/pyannote_fastapi/pkgs/container/pyannote_fastapi) (`ghcr.io/maximsachs/pyannote_fastapi`) — CUDA `:latest`, CPU `:latest-cpu`.
 
 **Integrating a client?** See [`docs/API.md`](docs/API.md) for the full endpoint reference, every error code, the SSE event schema, and the performance-tuning knobs.
 
