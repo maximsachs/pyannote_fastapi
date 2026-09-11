@@ -68,9 +68,9 @@ For multi-replica deployments set `RATE_LIMIT_STORAGE_URI=redis://…` so limits
 | `Authorization: Bearer <key>` | header | yes | API key (see above). |
 | `Accept: text/event-stream` | header | recommended | Signals intent; the server returns SSE regardless. |
 | `file` | multipart form field | yes | Audio file (any format `torchaudio` can decode — wav, flac, mp3, m4a, …). |
-| `num_speakers` | query | no | Exact number of speakers (overrides min/max). |
-| `min_speakers` | query | no | Lower bound on speaker count. |
-| `max_speakers` | query | no | Upper bound on speaker count. |
+| `num_speakers` | query | no | Hint for the exact number of speakers (integer ≥ 1). When set, pyannote treats this as overriding `min_speakers` / `max_speakers`. The SSE `result.num_speakers` is still the count the model produced, not this hint. |
+| `min_speakers` | query | no | Lower bound on speaker count (integer ≥ 1). |
+| `max_speakers` | query | no | Upper bound on speaker count (integer ≥ 1). Must be ≥ `min_speakers` when both are set. |
 | `exclusive` | query | no | If `true`, return the pipeline's `exclusive_speaker_diarization` output (non-overlapping segments). Default `false`. |
 
 ### Successful response
@@ -93,7 +93,7 @@ The following errors are returned before the SSE stream begins, with a normal JS
 | `429` | `rate_limited` | `Retry-After: 1`, `X-RateLimit-*` | Per-key or per-IP rate limit was exceeded. Detail field is the limit string that was breached. | Honour `Retry-After`. Back off exponentially on repeated 429s. |
 | `503` | `pipeline_not_loaded` | — | The container is up but the pipeline is still initialising (cold start, model download). | Retry with exponential backoff; `/health` will be `200` once ready. |
 | `503` | `queue_full` | `Retry-After: 5` | The in-process queue has reached `MAX_QUEUE_DEPTH` (default `64`). | Honour `Retry-After`, then retry. Detail payload includes `max_queue_depth`. |
-| `422` | (FastAPI validation) | — | Missing `file` field, invalid query parameter type, etc. | Fix the request; do not retry as-is. |
+| `422` | (FastAPI / Pydantic validation) | — | Missing `file` field, invalid query parameter type, `num_speakers` / `min_speakers` / `max_speakers` below 1, or `min_speakers` > `max_speakers`. | Fix the request; do not retry as-is. |
 
 ## SSE event reference
 

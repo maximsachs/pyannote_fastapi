@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import os
@@ -22,7 +23,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, Histogram
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger("pyannote_service")
 
@@ -636,9 +637,9 @@ async def complete_upload_session(
     upload_id: str,
     request: Request,
     response: Response,
-    num_speakers: Annotated[int | None, Query()] = None,
-    min_speakers: Annotated[int | None, Query()] = None,
-    max_speakers: Annotated[int | None, Query()] = None,
+    num_speakers: Annotated[int | None, Query(ge=1)] = None,
+    min_speakers: Annotated[int | None, Query(ge=1)] = None,
+    max_speakers: Annotated[int | None, Query(ge=1)] = None,
     exclusive: Annotated[bool, Query()] = False,
 ) -> StreamingResponse:
     if (
@@ -647,6 +648,16 @@ async def complete_upload_session(
         or _diarization_params_type is None
     ):
         raise HTTPException(status_code=503, detail={"error": "pipeline_not_loaded"})
+
+    try:
+        params = _diarization_params_type(
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            exclusive=exclusive,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=json.loads(exc.json())) from exc
 
     session = await _get_open_session(upload_id)
     if not session.is_complete():
@@ -676,12 +687,6 @@ async def complete_upload_session(
         if session.content_sha256 is not None:
             _verify_content_sha256(assembled_path, session.content_sha256)
 
-        params = _diarization_params_type(
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            exclusive=exclusive,
-        )
         job = await _enqueue_diarization(
             assembled_path,
             params,

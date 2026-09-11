@@ -8,7 +8,9 @@ import time
 import wave
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+from pyannote.core import Annotation, Segment
 
 import chunked_upload
 import main
@@ -88,10 +90,15 @@ def _upload_all_chunks(
         assert r.status_code == 204, r.text
 
 
-def _complete_session(client: TestClient, upload_id: str) -> Any:
+def _complete_session(
+    client: TestClient,
+    upload_id: str,
+    params: dict[str, Any] | None = None,
+) -> Any:
     return client.post(
         f"/diarize/sessions/{upload_id}/complete",
         headers={**_auth_headers(), "Accept": "text/event-stream"},
+        params=params,
     )
 
 
@@ -129,6 +136,49 @@ def test_chunked_happy_path() -> None:
     assert "result" in [name for name, _ in events]
     result = next(data for name, data in events if name == "result")
     assert "segments" in result
+
+
+def test_chunked_complete_rejects_invalid_speaker_count_query() -> None:
+    wav = _silent_wav_bytes()
+    with TestClient(main.app) as client:
+        session = _create_session(client, wav, chunk_size=len(wav))
+        _upload_all_chunks(client, session, wav)
+        r = _complete_session(
+            client,
+            session["upload_id"],
+            params={"min_speakers": 5, "max_speakers": 1},
+        )
+    assert r.status_code == 422
+
+
+def test_chunked_complete_forwards_speaker_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _SpyPipeline:
+        def __call__(self, *_args: object, **kwargs: object) -> dict[str, Annotation]:
+            captured.clear()
+            captured.update(kwargs)
+            ann = Annotation()
+            ann[Segment(0.0, 0.4)] = "SPEAKER_00"
+            return {"speaker_diarization": ann}
+
+    wav = _silent_wav_bytes()
+    with TestClient(main.app) as client:
+        monkeypatch.setattr(main, "_pipeline", _SpyPipeline())
+        session = _create_session(client, wav, chunk_size=len(wav))
+        _upload_all_chunks(client, session, wav)
+        r = _complete_session(
+            client,
+            session["upload_id"],
+            params={"num_speakers": 3},
+        )
+        assert r.status_code == 200
+        result = next(data for name, data in _parse_sse(r.text) if name == "result")
+
+    assert captured == {"num_speakers": 3}
+    assert result["num_speakers"] == 1
 
 
 def test_chunked_idempotent_chunk_put() -> None:

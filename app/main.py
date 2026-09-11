@@ -36,7 +36,7 @@ from prometheus_client import (
 )
 from pyannote.audio import Pipeline
 from pyannote.core import Annotation, Segment
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 
@@ -384,10 +384,37 @@ def _annotation_to_segments(diarization: Annotation) -> tuple[list[SegmentModel]
 
 
 class _DiarizationParams(BaseModel):
-    num_speakers: int | None = None
-    min_speakers: int | None = None
-    max_speakers: int | None = None
+    num_speakers: int | None = Field(default=None, ge=1)
+    min_speakers: int | None = Field(default=None, ge=1)
+    max_speakers: int | None = Field(default=None, ge=1)
     exclusive: bool = False
+
+    @model_validator(mode="after")
+    def _speaker_bounds_are_consistent(self) -> "_DiarizationParams":
+        if (
+            self.min_speakers is not None
+            and self.max_speakers is not None
+            and self.min_speakers > self.max_speakers
+        ):
+            raise ValueError("min_speakers must be less than or equal to max_speakers")
+        return self
+
+
+def _parse_diarization_params(
+    num_speakers: int | None,
+    min_speakers: int | None,
+    max_speakers: int | None,
+    exclusive: bool,
+) -> _DiarizationParams:
+    try:
+        return _DiarizationParams(
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            exclusive=exclusive,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=json.loads(exc.json())) from exc
 
 
 class _Job:
@@ -748,9 +775,9 @@ async def diarize(
     request: Request,
     response: Response,
     file: Annotated[UploadFile, File(..., description="Audio file")],
-    num_speakers: Annotated[int | None, Query()] = None,
-    min_speakers: Annotated[int | None, Query()] = None,
-    max_speakers: Annotated[int | None, Query()] = None,
+    num_speakers: Annotated[int | None, Query(ge=1)] = None,
+    min_speakers: Annotated[int | None, Query(ge=1)] = None,
+    max_speakers: Annotated[int | None, Query(ge=1)] = None,
     exclusive: Annotated[bool, Query()] = False,
 ) -> StreamingResponse:
     if _pipeline is None or _JOB_QUEUE is None:
@@ -805,11 +832,11 @@ async def diarize(
             detail={"error": "upload_too_large", "max_bytes": MAX_UPLOAD_BYTES},
         )
 
-    params = _DiarizationParams(
-        num_speakers=num_speakers,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers,
-        exclusive=exclusive,
+    params = _parse_diarization_params(
+        num_speakers,
+        min_speakers,
+        max_speakers,
+        exclusive,
     )
     job = await _enqueue_diarization_job(tmp_path, params)
 
