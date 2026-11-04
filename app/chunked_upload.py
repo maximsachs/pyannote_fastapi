@@ -16,7 +16,7 @@ import wave
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -106,7 +106,7 @@ CHUNKED_SESSION_TO_RESULT_SECONDS = Histogram(
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
-class SessionState(str, Enum):
+class SessionState(StrEnum):
     OPEN = "open"
     COMPLETING = "completing"
     COMPLETED = "completed"
